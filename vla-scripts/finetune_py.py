@@ -355,7 +355,7 @@ def run_forward_pass(
             input_ids=batch["input_ids"].to(device_id),
             attention_mask=batch["attention_mask"].to(device_id),
             pixel_values=batch["pixel_values"].to(torch.float16).to(device_id),
-            labels=batch["labels"],
+            labels=batch["labels"].to(device_id),
             output_hidden_states=True,
             proprio=batch["proprio"].to(device_id) if use_proprio else None,
             proprio_projector=proprio_projector if use_proprio else None,
