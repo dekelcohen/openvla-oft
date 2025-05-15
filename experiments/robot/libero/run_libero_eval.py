@@ -86,7 +86,14 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path - 
+                                                       # Ex: moojink/openvla-7b-oft-finetuned-libero-spatial
+                                                       # Ex: path to checkpoint of finetuned model merged with lora adapter 
+                                                       # Ex: path to checkpoint of only the lora adapter 
+                                                       
+    base_model_path: Union[str, Path] = ""           # in case pretrained_checkpoint refers to lora adapter-only path, 
+                                                     # specifies the base model 
+                                                       # Ex: openvla/openvla-7b
 
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_diffusion: bool = False                      # If True, uses continuous action head with diffusion modeling objective (DDIM)

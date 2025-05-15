@@ -18,6 +18,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
+from peft import PeftModel
 # Apply JSON numpy patch for serialization
 json_numpy.patch()
 
@@ -252,42 +253,70 @@ def load_component_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
 
 def get_vla(cfg: Any) -> torch.nn.Module:
     """
-    Load and initialize the VLA model from checkpoint.
+    Load and initialize the VLA model from checkpoint or base + LoRA adapter.
 
     Args:
-        cfg: Configuration object
-
+        cfg: Configuration object with attributes:
+            - base_model_path (Optional[str]): path to the base model
+            - pretrained_checkpoint (str): path or HF identifier of the LoRA adapter or full model
+            - load_in_8bit (bool)
+            - load_in_4bit (bool)
+            - use_film (bool)
+            - num_images_in_input (int)
     Returns:
         torch.nn.Module: The initialized VLA model
     """
     print("Instantiating pretrained VLA policy...")
 
-    # If loading a locally stored pretrained checkpoint, check whether config or model files
-    # need to be synced so that any changes the user makes to the VLA modeling code will
-    # actually go into effect
-    # If loading a pretrained checkpoint from Hugging Face Hub, we just assume that the policy
-    # will be used as is, with its original modeling logic
-    if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
-        # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
-        AutoConfig.register("openvla", OpenVLAConfig)
-        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-        AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+    # If loading a base model + LoRA adapter
+    if getattr(cfg, 'base_model_path', None):
+        # Load the base model first
+        vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.base_model_path,
+            torch_dtype=torch.bfloat16,
+            load_in_8bit=cfg.load_in_8bit,
+            load_in_4bit=cfg.load_in_4bit,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        # Determine adapter directory (supports 'lora_adapter' subfolder)
+        adapter_dir = (
+            os.path.join(cfg.pretrained_checkpoint, "lora_adapter")
+            if os.path.isdir(os.path.join(cfg.pretrained_checkpoint, "lora_adapter"))
+            else cfg.pretrained_checkpoint
+        )
+        # Apply LoRA adapter, with error clarity if config missing
+        try:
+            vla = PeftModel.from_pretrained(
+                vla,
+                adapter_dir,
+                torch_dtype=torch.bfloat16,
+                is_trainable=False,
+            )
+        except ValueError as e:
+            if 'adapter_config.json' in str(e):
+                raise ValueError(
+                    f"Failed to find adapter_config.json in '{adapter_dir}'. "
+                    f"Please ensure your LoRA adapter directory was created with `peft_model.save_pretrained('{adapter_dir}')`, "
+                    f"which generates the necessary 'adapter_config.json'."
+                )
+            else:
+                raise
+    else:
+        # Original behavior: load full pretrained model
+        if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
+            # Sync config and model files for local pre-trained checkpoint
+            update_auto_map(cfg.pretrained_checkpoint)
+            check_model_logic_mismatch(cfg.pretrained_checkpoint)
 
-        # Update config.json and sync model files
-        update_auto_map(cfg.pretrained_checkpoint)
-        check_model_logic_mismatch(cfg.pretrained_checkpoint)
-
-    # Load the model
-    vla = AutoModelForVision2Seq.from_pretrained(
-        cfg.pretrained_checkpoint,
-        # attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
-        load_in_8bit=cfg.load_in_8bit,
-        load_in_4bit=cfg.load_in_4bit,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    )
+        vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.pretrained_checkpoint,
+            torch_dtype=torch.bfloat16,
+            load_in_8bit=cfg.load_in_8bit,
+            load_in_4bit=cfg.load_in_4bit,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
 
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
     if cfg.use_film:
@@ -304,47 +333,6 @@ def get_vla(cfg: Any) -> torch.nn.Module:
 
     # Load dataset stats for action normalization
     _load_dataset_stats(vla, cfg.pretrained_checkpoint)
-
-    return vla
-
-
-def _apply_film_to_vla(vla: torch.nn.Module, cfg: Any) -> torch.nn.Module:
-    """
-    Apply FiLM (Feature-wise Linear Modulation) to the VLA vision backbone.
-
-    Args:
-        vla: The VLA model
-        cfg: Configuration object with model parameters
-
-    Returns:
-        torch.nn.Module: VLA model with FiLM applied
-    """
-    from peft import LoraConfig, get_peft_model
-
-    # Apply LoRA configuration
-    lora_config = LoraConfig(
-        r=cfg.lora_rank,
-        lora_alpha=min(cfg.lora_rank, 16),
-        lora_dropout=0.0,
-        target_modules="all-linear",
-        init_lora_weights="gaussian",
-    )
-    vla = get_peft_model(vla, lora_config)
-
-    # Create and apply FiLMed vision backbone
-    new_vision_backbone = FiLMedPrismaticVisionBackbone(
-        vision_backbone=vla.vision_backbone, llm_dim=vla.llm_dim,
-    )
-    vla.model.vision_backbone = new_vision_backbone
-
-    # Load vision backbone checkpoint
-    checkpoint_path = find_checkpoint_file(cfg.pretrained_checkpoint, "vision_backbone")
-    state_dict = torch.load(checkpoint_path, weights_only=True)
-    vla.model.vision_backbone.load_state_dict(state_dict)
-
-    # Use the model component instead of wrapper and convert to bfloat16
-    vla = vla.model
-    vla.vision_backbone = vla.vision_backbone.to(torch.bfloat16)
 
     return vla
 

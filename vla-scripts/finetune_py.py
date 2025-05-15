@@ -70,7 +70,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 class FinetuneConfig:
     # fmt: off
     vla_path: str = "openvla/openvla-7b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
-
+    base_model_path: Union[str, Path] = ""           # in case pretrained_checkpoint refers to lora adapter-only path, 
+                                                     # specifies the base model 
+                                                       # Ex: openvla/openvla-7b
     # Dataset
     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
     dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
